@@ -20,4 +20,3 @@ jobs:
     uses: crosstalkis/shared-workflows/.github/workflows/conjur-fetch.yml@v1
     with:
       app-name: beta
-      secret-id: apps/alpha/secrets/db-password  # R1 T2 cross-app test — REVERT after capture
