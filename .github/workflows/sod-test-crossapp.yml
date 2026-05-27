@@ -1,0 +1,55 @@
+name: SoD Cross-App Test (v2)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  CONJUR_URL: "https://conjur-oss.conjur.svc.cluster.local"
+  CONJUR_ACCOUNT: "lab"
+  CONJUR_CACERT: "/etc/conjur/ssl/ca.pem"
+
+jobs:
+  # Case 4a: NEGATIVE — beta repo tries to auth as alpha-prod (repo mismatch -> 401)
+  case4a-beta-auths-alpha:
+    runs-on: lab-runners
+    environment: prod
+    steps:
+      - name: "Case 4a: beta repo -> auth as alpha-prod (expect 401)"
+        run: |
+          set -euo pipefail
+
+          jwt=$(curl -sSf \
+            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=conjur/lab" | jq -r '.value')
+          echo "::add-mask::${jwt}"
+
+          HOST_ID="host%2Falpha%2Falpha-prod"
+          http_auth=$(curl -sS -o /tmp/auth -w '%{http_code}' \
+            --cacert "${CONJUR_CACERT}" \
+            -H "Accept: application/json" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "jwt=${jwt}" \
+            "${CONJUR_URL}/authn-jwt/gha-v2/${CONJUR_ACCOUNT}/${HOST_ID}/authenticate")
+
+          if [[ "${http_auth}" == "401" ]]; then
+            echo "CASE 4a PASS — beta repo correctly rejected at authn as alpha-prod (401)"
+          else
+            echo "::error::CASE 4a FAIL — Expected 401, got ${http_auth}"
+            cat /tmp/auth >&2; exit 1
+          fi
+
+  # Case 4b: NEGATIVE — beta-prod (legit authn via reusable wf) tries alpha secret (403)
+  case4b-beta-reads-alpha:
+    uses: crosstalkis/shared-workflows/.github/workflows/sod-test-authz.yml@v2
+    with:
+      host-id: "beta/beta-prod"
+      secret-path: "alpha/prod/db-password"
+      expected-fetch-status: "403"
+      environment: "prod"
+    permissions:
+      id-token: write
+      contents: read
