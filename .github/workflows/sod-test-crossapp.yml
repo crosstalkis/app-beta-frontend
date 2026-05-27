@@ -42,14 +42,43 @@ jobs:
             cat /tmp/auth >&2; exit 1
           fi
 
-  # Case 4b: NEGATIVE — beta-prod (legit authn via reusable wf) tries alpha secret (403)
-  case4b-beta-reads-alpha:
-    uses: crosstalkis/shared-workflows/.github/workflows/sod-test-authz.yml@v2
-    with:
-      host-id: "beta/beta-prod"
-      secret-path: "alpha/prod/db-password"
-      expected-fetch-status: "403"
-      environment: "prod"
-    permissions:
-      id-token: write
-      contents: read
+  # Case 4b: NEGATIVE — beta repo tries to auth as beta-prod (job_workflow_ref mismatch -> 401)
+  # beta-prod requires job_workflow_ref=conjur-fetch-v2.yml@refs/tags/v2 (golden path).
+  # This inline test runs from sod-test-crossapp.yml, so job_workflow_ref doesn't match.
+  # This proves the golden-path enforcement: beta-prod can ONLY be used via the trusted workflow.
+  case4b-beta-golden-path-enforced:
+    runs-on: lab-runners
+    environment: prod
+    steps:
+      - name: "Case 4b: beta repo direct -> auth as beta-prod (expect 401, golden-path enforcement)"
+        run: |
+          set -euo pipefail
+
+          jwt=$(curl -sSf \
+            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=conjur/lab" | jq -r '.value')
+          echo "::add-mask::${jwt}"
+
+          # Decode and show the actual job_workflow_ref for evidence
+          payload_b64="${jwt#*.}"; payload_b64="${payload_b64%%.*}"
+          b64="${payload_b64//-/+}"; b64="${b64//_/\/}"
+          pad=$(( (4 - ${#b64} % 4) % 4 ))
+          b64="${b64}$(printf '%*s' "${pad}" '' | tr ' ' '=')"
+          payload_json=$(printf '%s' "${b64}" | base64 -d 2>/dev/null)
+          echo "JWT job_workflow_ref: $(jq -r '.job_workflow_ref // "none"' <<< "${payload_json}")"
+          echo "Host annotation expects: crosstalkis/shared-workflows/.github/workflows/conjur-fetch-v2.yml@refs/tags/v2"
+
+          HOST_ID="host%2Fbeta%2Fbeta-prod"
+          http_auth=$(curl -sS -o /tmp/auth -w '%{http_code}' \
+            --cacert "${CONJUR_CACERT}" \
+            -H "Accept: application/json" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "jwt=${jwt}" \
+            "${CONJUR_URL}/authn-jwt/gha-v2/${CONJUR_ACCOUNT}/${HOST_ID}/authenticate")
+
+          if [[ "${http_auth}" == "401" ]]; then
+            echo "CASE 4b PASS — beta-prod correctly rejected: job_workflow_ref mismatch (golden-path enforcement)"
+          else
+            echo "::error::CASE 4b FAIL — Expected 401, got ${http_auth}"
+            cat /tmp/auth >&2; exit 1
+          fi
