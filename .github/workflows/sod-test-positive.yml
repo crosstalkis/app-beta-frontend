@@ -1,0 +1,19 @@
+name: "Case 5: Beta golden-path positive test (v2)"
+
+# Proves that beta-prod CAN authenticate when called through the
+# blessed conjur-fetch-v2.yml reusable workflow, and can fetch
+# its own secret (beta/prod/db-password).
+
+on:
+  workflow_dispatch:
+
+jobs:
+  case5-beta-golden-path-works:
+    uses: crosstalkis/shared-workflows/.github/workflows/conjur-fetch-v2.yml@v2
+    with:
+      host-id: "beta/beta-prod"
+      environment: "prod"
+      secrets: "beta/prod/db-password"
+    permissions:
+      id-token: write
+      contents: read
