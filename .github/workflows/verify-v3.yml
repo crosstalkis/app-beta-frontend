@@ -1,0 +1,87 @@
+name: verify-v3
+
+# v3 (SAS-anchored) Conjur auth end-to-end test for app-beta-frontend.
+# Expected SAS identity: sas-beta. Demonstrates multi-repo-per-SAS — this
+# repo is one of three (-frontend, -backend, -infra) that all bind to the
+# same SAS host (host/sas/sas-beta) and share the same secrets.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  verify:
+    runs-on: lab-runners
+    env:
+      AUDIENCE: conjur/lab/sas
+      CONJUR_URL: https://conjur-oss.conjur.svc.cluster.local
+      CONJUR_SERVICE_ID: gha-v3
+      CONJUR_ACCOUNT: lab
+      CONJUR_CACERT: /etc/conjur/ssl/ca.pem
+      EXPECTED_SAS: sas-beta
+      SECRET_ID: sas/sas-beta-secrets/db-password
+    steps:
+      - name: Mint JWT, exchange at v3, fetch secret, verify
+        run: |
+          set -euo pipefail
+
+          echo "::group::1. Mint JWT (audience=${AUDIENCE})"
+          jwt=$(curl -sSf \
+            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUDIENCE}" \
+            | jq -r '.value')
+          echo "::add-mask::${jwt}"
+          echo "JWT minted (length=${#jwt})"
+
+          payload_b64="${jwt#*.}"
+          payload_b64="${payload_b64%%.*}"
+          b64="${payload_b64//-/+}"
+          b64="${b64//_/\/}"
+          pad=$(( (4 - ${#b64} % 4) % 4 ))
+          b64="${b64}$(printf '%*s' "${pad}" '' | tr ' ' '=')"
+          payload_json=$(printf '%s' "${b64}" | base64 -d)
+          actual_sas=$(jq -r '.repo_property_sas_id // "MISSING"' <<< "${payload_json}")
+          echo "JWT carries repo_property_sas_id = ${actual_sas}"
+          if [[ "${actual_sas}" != "${EXPECTED_SAS}" ]]; then
+            echo "::error::Expected ${EXPECTED_SAS}, got ${actual_sas}"
+            exit 1
+          fi
+          echo "::endgroup::"
+
+          echo "::group::2. Exchange JWT at /authn-jwt/${CONJUR_SERVICE_ID}/${CONJUR_ACCOUNT}/authenticate"
+          http_code=$(curl -sS -o /tmp/conjur-resp -w '%{http_code}' \
+            --cacert "${CONJUR_CACERT}" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "jwt=${jwt}" \
+            "${CONJUR_URL}/authn-jwt/${CONJUR_SERVICE_ID}/${CONJUR_ACCOUNT}/authenticate")
+          echo "HTTP ${http_code}"
+          if [[ "${http_code}" != "200" ]]; then
+            echo "::error::JWT exchange returned ${http_code}"
+            cat /tmp/conjur-resp >&2 || true
+            exit 1
+          fi
+          access_token=$(cat /tmp/conjur-resp)
+          echo "::add-mask::${access_token}"
+          echo "Access token received (length=${#access_token})"
+          echo "::endgroup::"
+
+          echo "::group::3. Fetch ${SECRET_ID}"
+          token_b64=$(printf '%s' "${access_token}" | base64 -w0)
+          echo "::add-mask::${token_b64}"
+          secret_enc=$(printf '%s' "${SECRET_ID}" | jq -sRr @uri)
+          secret_value=$(curl -sSf --cacert "${CONJUR_CACERT}" \
+            -H "Authorization: Token token=\"${token_b64}\"" \
+            "${CONJUR_URL}/secrets/${CONJUR_ACCOUNT}/variable/${secret_enc}")
+          echo "::add-mask::${secret_value}"
+          echo "Secret fetched (length=${#secret_value})"
+
+          if [[ "${secret_value}" == ${EXPECTED_SAS}-secret-* ]]; then
+            echo "VERIFY_V3 sas=${EXPECTED_SAS} repo=${GITHUB_REPOSITORY} result=MATCH"
+          else
+            echo "::error::Secret prefix does not match expected sas (length=${#secret_value})"
+            exit 1
+          fi
+          echo "::endgroup::"
