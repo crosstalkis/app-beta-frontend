@@ -1,0 +1,57 @@
+name: tm-dev
+
+# Threat-model harness — DEV repo (sas-beta, repo_type=dev).
+# Positive proves the DEV repo reads its DEV safe; negatives prove it cannot
+# reach another SAS (T-2) or an OPS safe (T-4). Each negative isolates ONE
+# failing annotation.
+#
+# Requires: scripts 10 + 13 applied; script 12 loaded; shared-workflows @v4.
+# Trigger: workflow_dispatch. Lab diagnostic only.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # ---- POSITIVE: dev repo reads its own DEV-shared safe ----
+  pos-dev:
+    runs-on: lab-runners
+    steps:
+      - uses: crosstalkis/shared-workflows/.github/actions/tm-conjur-attempt@v4
+        with:
+          host-id: sas-topo/sas-beta/dev
+          expect-code: '200'
+          secret-id: sas-topo/sas-beta/dev-shared/secret
+          expect-prefix: sas-beta-dev-shared-secret-
+          label: pos-dev
+
+  # ---- T-2: cross-SAS via DEV safe ----
+  # This is a sas-beta repo trying to authenticate as the sas-alpha DEV host.
+  # repo_type=dev✓ but repo_property_sas_id=sas-beta ✗ (host pins sas-alpha) -> 401
+  # The 401 is attributable to the SAS claim — a GitHub-set, unforgeable property.
+  t2-crosssas:
+    runs-on: lab-runners
+    steps:
+      - uses: crosstalkis/shared-workflows/.github/actions/tm-conjur-attempt@v4
+        with:
+          host-id: sas-topo/sas-alpha/dev
+          expect-code: '401'
+          label: t2-crosssas
+
+  # ---- T-4: cross-repo-type (DEV repo reaching OPS safe, same SAS) ----
+  # environment=dev so the only mismatching annotation is repo_type:
+  # sas_id=sas-beta✓ environment=dev✓ repo_property_repo_type=dev ✗
+  # (ops-dev host pins repo_type=ops) -> 401, attributable to repo_type.
+  # The group/permit (authz) layer is never reached — authn fires first.
+  t4-crossrepotype:
+    runs-on: lab-runners
+    environment: dev
+    steps:
+      - uses: crosstalkis/shared-workflows/.github/actions/tm-conjur-attempt@v4
+        with:
+          host-id: sas-topo/sas-beta/ops-dev
+          expect-code: '401'
+          label: t4-crossrepotype
